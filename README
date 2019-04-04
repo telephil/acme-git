@@ -1,0 +1,15 @@
+acme-git
+========
+A git tool for the Acme editor.
+
+DESCRIPTION
+----------- 
+The acme-git tool wraps a few common git commands in an Acme window.
+The available commands are mainly displaying raw git output with the 
+exception of the Status command which displays a list of readily available 
+git commands based on the files' status.
+
+The following plumbing rule can be used to show the content of a commit from the `git log` output:
+	type	is	text
+	data	matches	'commit ([a-zA-Z0-9]+)'
+	plumb	start	rc -c 'git -C '$wdir' show '$1' | plumb -w '$wdir' -d edit -a ''action=showdata filename=+'$1''' -i'
