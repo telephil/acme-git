@@ -1,38 +1,4 @@
-#include <u.h>
-#include <libc.h>
-#include <bio.h>
-#include <thread.h>
-#include <9pclient.h>
-#include <acme.h>
-
-typedef struct Status Status;
-
-struct Status
-{
-	int 	state;
-	char	*filename;
-	char	*extra;
-	Status	*next;
-};
-
-enum
-{
-	Staged = 0,
-	Modified,
-	Renamed,
-	Untracked
-};
-
-char *statestr[] = {
-	"Staged",
-	"Modified",
-	"Renamed",
-	"Untracked"
-};
-
-char *gitlog[] = { "git", "log", nil };
-char *gitcommit[] = { "git", "commit", nil };
-char *gitpush[] = { "git", "push", "--porcelain", nil };
+#include "a.h"
 
 Win* win;
 
@@ -49,23 +15,39 @@ mkstatus(int s, char *f, char *e)
 	return status;
 }
 
+void
+deletestatus(Status *s)
+{
+	Status *c, *n;
+
+	for(c = s; c;){
+		n = c->next;
+		if(c->filename)
+			free(c->filename);
+		if(c->extra)
+			free(c->extra);
+		free(c);
+		c = n;		
+	}
+}
+
 Status*
-parsestatus(char* line)
+parsestatus(char *s)
 {
 	Status* status;
 	char* tokens[2];
 	char* filename;
 
 	status = nil;
-	tokenize(line, tokens, 2);
+	tokenize(s, tokens, 2);
 	filename = tokens[1];
-	switch(line[0]){
+	switch(s[0]){
 	case ' ':
 	case 'R':
-		if(line[1] == 'M'){
+		if(s[1] == 'M'){
 			status = mkstatus(Modified, filename, nil);
 		} else {
-			fprint(2, "unknown status '%c%c'", line[0], line[1]);
+			fprint(2, "unknown status '%c%c'", s[0], s[1]);
 		}
 		break;
 	case 'M':
@@ -113,7 +95,7 @@ printstatus(Status *status)
 }
 
 int
-git(char** argv)
+gitfd(char *argv[])
 {
 	int p[2], pid;
 
@@ -139,38 +121,41 @@ gitstatus(void)
 	int fd;
 	Biobuf bio;
 	char *line;
-	Status *status, *current, *s;
+	Status *status, *c, *n;
 
 	status = nil;
-	fd = git(argv);
+	fd = gitfd(argv);
 	Binit(&bio, fd, OREAD);
 	while((line = Brdstr(&bio, '\n', 0)) != nil){
-		s = parsestatus(line);
+		n = parsestatus(line);
 		if(status){
-			current->next = s;
-			current = current->next;
+			c->next = n;
+			c = c->next;
 		}else{
-			status = s;
-			current = status;
+			status = n;
+			c = status;
 		}
+		free(line);
 	}
 	close(fd);
 	Bterm(&bio);
 	printstatus(status);
+	deletestatus(status);
 }
 
 void
-gitcmd(char **argv)
+gitpipetowin(char *argv[])
 {
 	int fd;
 	Biobuf bio;
 	char *line;
 
-	fd = git(argv);
+	fd = gitfd(argv);
 	Binit(&bio, fd, OREAD);
 	winprint(win, "addr", "1,$");
 	while((line = Brdstr(&bio, '\n', 0)) != nil){
 		winprint(win, "data", line);
+		free(line);
 	}
 	winprint(win, "ctl", "clean\n");
 	close(fd);
@@ -178,67 +163,128 @@ gitcmd(char **argv)
 }
 
 void
-cd(char* dir)
+gitlog(void)
 {
+	char *argv[] = { "git", "log", nil };
+	gitpipetowin(argv);
+}
+
+void
+gitcommit(void)
+{
+	char *argv[] = { "git", "commit", nil };
+	gitpipetowin(argv);
+}
+
+void
+gitpush(void)
+{
+	char *argv[] = { "git", "push", "--porcelain", nil };
+	gitpipetowin(argv);
+}
+
+
+void
+gitcdroot(void)
+{
+	char *argv[4] = { "git", "rev-parse", "--show-toplevel", nil };
+	Biobuf bio;
+	char *s;
 	int fd;
 
-	fd = open(dir, O_RDONLY);
-	if(fd < 0)
-		sysfatal("open: %r");
-	if(fchdir(fd) < 0)
-		sysfatal("fchdir: %r");
+	fd = gitfd(argv);
+	Binit(&bio, fd, OREAD);
+	s = Brdstr(&bio, '\n', 1);
+	if(s == nil)
+		sysfatal("unable to get toplevel dir");
 	close(fd);
+	Bterm(&bio);
+	fd = open(s, O_RDONLY);
+	if(fd < 0){
+		free(s);
+		sysfatal("open: %r");
+	}
+	if(fchdir(fd) < 0){
+		close(fd);
+		free(s);
+		sysfatal("fchdir: %r");
+	}
+	close(fd);
+	free(s);
+}
+
+void
+mkwin(void)
+{
+	char pwd[1024];
+	
+	win = newwin();
+	winprint(win, "ctl", "cleartag\n");
+	winprint(win, "tag", " Log Status Commit Push");
+	winname(win, "%s/+Git", getwd(pwd, 1024));
+}
+
+int
+getcmd(Event *e)
+{
+	int cmd;
+
+	cmd = -1;
+	if(e->c1 == 'M' && (e->c2 == 'x' || e->c2 == 'X')){
+		if(!strcmp(e->text, "Del"))
+			cmd = Cdelete;
+		else if(!strcmp(e->text, "Status"))
+			cmd = Cstatus;
+		else if(!strcmp(e->text, "Log"))
+			cmd = Clog;
+		else if(!strcmp(e->text, "Commit"))
+			cmd = Ccommit;
+		else if(!strcmp(e->text, "Push"))
+			cmd = Cpush;
+	}
+	return cmd;
+}
+
+void
+eventloop(void)
+{
+	Channel* c;
+	Event *e;
+	int cmd;
+
+	c = wineventchan(win);
+	for(;;){
+		e = recvp(c);
+		cmd = getcmd(e);
+		switch(cmd){
+		case Cdelete:
+			winwriteevent(win, e);
+			threadexitsall(nil);
+			break;
+		case Cstatus:
+			gitstatus();
+			break;
+		case Clog:
+			gitlog();
+			break;
+		case Ccommit:
+			gitcommit();
+			break;	
+		case Cpush:
+			gitpush();
+			break;
+		default:
+			winwriteevent(win, e);
+			break;
+		}
+	}
 }
 
 void
 threadmain(int argc, char** argv)
 {
-	char* revparseargs[4] = { "git", "rev-parse", "--show-toplevel", nil };
-	char pwd[1024];
-	int fd;
-	Biobuf bio;
-	char *line;
-	Channel* c;
-	int handled;
-	Event *e;
-
-	fd = git(revparseargs);
-	Binit(&bio, fd, OREAD);
-	line = Brdstr(&bio, '\n', 0);
-	if(line == nil)
-		sysfatal("unable to get toplevel dir");
-	line[strlen(line)-1] = '\0';
-	cd(line);
-	close(fd);
-	Bterm(&bio);
-	win = newwin();
-	winprint(win, "ctl", "cleartag\n");
-	winprint(win, "tag", " Log Status Commit Push");
-	winname(win, "%s/+Git", getwd(pwd, 1024));
+	gitcdroot();
+	mkwin();
 	gitstatus();
-	c = wineventchan(win);
-	for(;;){
-		handled = 1;
-		e = recvp(c);
-		if(e->c1 == 'M' && (e->c2 == 'x' || e->c2 == 'X')){
-			if(strcmp(e->text, "Del") == 0){
-				winwriteevent(win, e);
-				break;
-			}else if(strcmp(e->text, "Status") == 0){
-				gitstatus();
-			}else if(strcmp(e->text, "Log") == 0){
-				gitcmd(gitlog);
-			}else if(strcmp(e->text, "Commit") == 0){
-				gitcmd(gitcommit);
-			}else if(strcmp(e->text, "Push") == 0){
-				gitcmd(gitpush);
-			}else{
-				handled = 0;
-			}
-		}
-		if(!handled){
-			winwriteevent(win, e);
-		}
-	}
-	threadexitsall(nil);
+	eventloop();
 }
