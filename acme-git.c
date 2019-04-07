@@ -40,7 +40,7 @@ parsestatus(char *s)
 
 	status = nil;
 	tokenize(s, tokens, 2);
-	filename = tokens[1];
+	filename = strdup(tokens[1]);
 	switch(s[0]){
 	case ' ':
 	case 'R':
